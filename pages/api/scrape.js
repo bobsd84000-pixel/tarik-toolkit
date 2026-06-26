@@ -1,119 +1,70 @@
 export default async function handler(req, res) {
   let { url } = req.body;
 
+  if (!url) return res.status(400).json({ error: "URL requise" });
+
+  // Nettoyer URL
+  let cleanUrl = url.trim();
+  if (!/^https?:\/\//i.test(cleanUrl)) cleanUrl = 'https://' + cleanUrl;
+  if (cleanUrl.includes('anthropic') && !cleanUrl.includes('.')) {
+    cleanUrl = cleanUrl.replace('anthropic', 'anthropic.com');
+  }
+
+  const cleanHtml = (html) => html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 5000);
+
+  // 1. Fetch direct
   try {
-    // Nettoyer l'URL
-    let cleanUrl = url.trim();
-    
-    if (!cleanUrl.startsWith('http')) {
-      cleanUrl = 'https://' + cleanUrl;
-    }
-
-    if (cleanUrl.includes('anthropic') && !cleanUrl.includes('.com') && !cleanUrl.includes('.')) {
-      cleanUrl = cleanUrl.replace('anthropic', 'anthropic.com');
-    }
-
-    console.log(`🔍 Tentative directe: ${cleanUrl}`);
-
-    // Essayer fetch direct
-    let html = null;
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-      const response = await fetch(cleanUrl, {
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; TarikBot/1.0)'
-        },
-        redirect: 'follow'
-      });
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const contentType = response.headers.get('content-type');
-        if (contentType?.includes('text/html')) {
-          html = await response.text();
-          console.log(`✅ Fetch direct: ${html.length} chars`);
-        }
-      }
-    } catch (e) {
-      console.log(`⚠️ Fetch direct échoué: ${e.message}`);
-    }
-
-    // Fallback: utiliser proxy CORS
-    if (!html) {
-      console.log(`🔄 Utilisation du proxy CORS...`);
-      
-      const proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(cleanUrl);
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-      const response = await fetch(proxyUrl, {
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; TarikBot/1.0)'
-        }
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`Proxy HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (data.status?.http_code === 200) {
-        html = data.contents;
-        console.log(`✅ Proxy CORS: ${html.length} chars`);
-      } else {
-        throw new Error(`Proxy returned: ${data.status?.http_code || 'unknown'}`);
-      }
-    }
-
-    if (!html) {
-      throw new Error('Impossible de charger le contenu');
-    }
-
-    // Nettoyer le HTML
-    const text = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 5000);
-
-    console.log(`✅ Success! Text: ${text.slice(0, 100)}...`);
-
-    return res.status(200).json({
-      success: true,
-      text,
-      url: cleanUrl,
-      length: text.length
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 8000);
+    const r = await fetch(cleanUrl, {
+      signal: c.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' },
+      redirect: 'follow'
     });
+    clearTimeout(t);
 
-  } catch (error) {
-    let errorMsg = error.message;
+    if (r.ok) {
+      const html = await r.text();
+      const text = cleanHtml(html);
+      if (text.length > 50) {
+        return res.status(200).json({ text, url: cleanUrl, source: 'direct' });
+      }
+    }
+    console.log(`Direct: HTTP ${r.status}, fallback proxy`);
+  } catch (e) {
+    console.log(`Direct échoué: ${e.message}, fallback proxy`);
+  }
 
-    if (error.name === 'AbortError') {
-      errorMsg = 'Timeout: site trop lent (>10s)';
-    } else if (error.message.includes('ENOTFOUND')) {
-      errorMsg = 'Domaine introuvable (DNS)';
-    } else if (error.message.includes('ECONNREFUSED')) {
-      errorMsg = 'Connexion refusée';
-    } else if (error.message.includes('ECONNRESET')) {
-      errorMsg = 'Connexion réinitialisée';
+  // 2. Fallback proxy (timeout plus long)
+  try {
+    const proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(cleanUrl);
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 20000);
+    const r = await fetch(proxyUrl, { signal: c.signal });
+    clearTimeout(t);
+
+    if (!r.ok) return res.status(502).json({ error: `Site inaccessible (proxy HTTP ${r.status})` });
+
+    const data = await r.json();
+    const httpCode = data.status?.http_code;
+
+    if (httpCode === 403 || httpCode === 401) {
+      return res.status(403).json({ error: `Ce site bloque le scraping (HTTP ${httpCode}). Essaie un autre site.` });
     }
 
-    console.error(`❌ ${error.name}: ${errorMsg}`);
+    if (!data.contents) return res.status(502).json({ error: "Aucun contenu récupéré" });
 
-    return res.status(500).json({
-      error: errorMsg,
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    const text = cleanHtml(data.contents);
+    return res.status(200).json({ text, url: cleanUrl, source: 'proxy' });
+
+  } catch (e) {
+    const msg = e.name === 'AbortError' ? 'Timeout: site trop lent (>20s)' : e.message;
+    return res.status(500).json({ error: msg });
   }
 }
