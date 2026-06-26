@@ -5,48 +5,78 @@ export default async function handler(req, res) {
     // Nettoyer l'URL
     let cleanUrl = url.trim();
     
-    // Ajouter https si manquant
     if (!cleanUrl.startsWith('http')) {
       cleanUrl = 'https://' + cleanUrl;
     }
 
-    // Corriger domaines malformés (anthropic → anthropic.com)
     if (cleanUrl.includes('anthropic') && !cleanUrl.includes('.com') && !cleanUrl.includes('.')) {
       cleanUrl = cleanUrl.replace('anthropic', 'anthropic.com');
     }
 
-    console.log(`🔍 Tentative: ${cleanUrl}`);
+    console.log(`🔍 Tentative directe: ${cleanUrl}`);
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => {
-      controller.abort();
-      console.log("⏱️ Timeout 10s");
-    }, 10000);
+    // Essayer fetch direct
+    let html = null;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-    const response = await fetch(cleanUrl, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; TarikBot/1.0)'
-      },
-      redirect: 'follow'
-    });
+      const response = await fetch(cleanUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; TarikBot/1.0)'
+        },
+        redirect: 'follow'
+      });
 
-    clearTimeout(timeoutId);
+      clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      const msg = `HTTP ${response.status}: ${response.statusText}`;
-      console.log(`❌ ${msg}`);
-      return res.status(502).json({ error: msg });
+      if (response.ok) {
+        const contentType = response.headers.get('content-type');
+        if (contentType?.includes('text/html')) {
+          html = await response.text();
+          console.log(`✅ Fetch direct: ${html.length} chars`);
+        }
+      }
+    } catch (e) {
+      console.log(`⚠️ Fetch direct échoué: ${e.message}`);
     }
 
-    const contentType = response.headers.get('content-type');
-    if (!contentType?.includes('text/html')) {
-      console.log("❌ Pas du HTML");
-      return res.status(400).json({ error: 'Le contenu n\'est pas du HTML' });
+    // Fallback: utiliser proxy CORS
+    if (!html) {
+      console.log(`🔄 Utilisation du proxy CORS...`);
+      
+      const proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(cleanUrl);
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch(proxyUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; TarikBot/1.0)'
+        }
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`Proxy HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (data.status?.http_code === 200) {
+        html = data.contents;
+        console.log(`✅ Proxy CORS: ${html.length} chars`);
+      } else {
+        throw new Error(`Proxy returned: ${data.status?.http_code || 'unknown'}`);
+      }
     }
 
-    const html = await response.text();
-    console.log(`✅ ${html.length} chars téléchargés`);
+    if (!html) {
+      throw new Error('Impossible de charger le contenu');
+    }
 
     // Nettoyer le HTML
     const text = html
