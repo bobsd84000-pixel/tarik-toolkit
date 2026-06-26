@@ -1,16 +1,15 @@
 export default async function handler(req, res) {
   const { text, mode, code } = req.body;
 
-  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+  const KEY = process.env.ANTHROPIC_API_KEY;
+  if (!KEY) return res.status(200).json({ result: "❌ ANTHROPIC_API_KEY manquante dans Vercel" });
 
-  if (!ANTHROPIC_KEY) {
-    return res.status(500).json({ error: "ANTHROPIC_API_KEY manquante dans Vercel env" });
-  }
+  // Diagnostic clé (sans l'exposer)
+  const keyInfo = `len=${KEY.length} prefix=${KEY.slice(0,7)} hasSpace=${/\s/.test(KEY)}`;
 
   let system, userContent, maxTokens;
-
   if (mode === "security") {
-    system = "Tu es un expert securite. Fournis:\n1. Vulnerabilites (CRITICAL/HIGH/MEDIUM)\n2. Fixes\n3. Score (0-100)\n4. Priorites";
+    system = "Tu es un expert securite. Fournis: 1) Vulnerabilites (CRITICAL/HIGH/MEDIUM) 2) Fixes 3) Score (0-100) 4) Priorites";
     userContent = `Audit:\n\n${(code || "").slice(0, 2000)}`;
     maxTokens = 1200;
   } else {
@@ -19,12 +18,16 @@ export default async function handler(req, res) {
     maxTokens = 1000;
   }
 
+  if (!userContent || userContent.trim().length < 10) {
+    return res.status(200).json({ result: "❌ Contenu vide à analyser" });
+  }
+
   try {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_KEY,
+        "content-type": "application/json",
+        "x-api-key": KEY.trim(),
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
@@ -35,19 +38,18 @@ export default async function handler(req, res) {
       })
     });
 
+    const raw = await r.text();
+
     if (!r.ok) {
-      const errText = await r.text();
-      console.error(`Claude API error ${r.status}: ${errText}`);
-      return res.status(502).json({ error: `Claude API ${r.status}` });
+      // Renvoyer l'erreur EXACTE de Claude au front pour debug
+      return res.status(200).json({ result: `❌ Claude ${r.status}\n[clé: ${keyInfo}]\n${raw.slice(0, 400)}` });
     }
 
-    const data = await r.json();
+    const data = JSON.parse(raw);
     const result = data.content?.[0]?.text || "Aucune reponse";
-
     return res.status(200).json({ result });
 
   } catch (e) {
-    console.error(`Erreur: ${e.message}`);
-    return res.status(500).json({ error: e.message });
+    return res.status(200).json({ result: `❌ Exception: ${e.message}` });
   }
 }
